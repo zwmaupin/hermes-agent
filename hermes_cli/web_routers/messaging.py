@@ -155,6 +155,11 @@ def _require_platform(platform_id: str) -> dict[str, Any]:
     return entry
 
 
+def _env_flag_on(value: Any) -> bool:
+    """True when an env var value represents a truthy flag (1/true/yes/on)."""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _platform_enablement(
     platform_id: str, entry: dict[str, Any], env_on_disk: dict[str, str], scoped: bool
 ) -> tuple[bool, bool, dict | None]:
@@ -163,17 +168,26 @@ def _platform_enablement(
     os.environ and would leak the root install's tokens into the profile's state."""
     required = entry["required_env"]
     if scoped:
-        configured = bool(required) and all(env_on_disk.get(key) for key in required)
         try:
             plat_cfg = (load_config().get("platforms") or {}).get(platform_id)
             plat_cfg = plat_cfg if isinstance(plat_cfg, dict) else {}
             hc = plat_cfg.get("home_channel")
             # Setup writes credentials without a platforms entry; explicit disable wins.
             raw_enabled = plat_cfg.get("enabled")
+            if required:
+                configured = all(env_on_disk.get(key) for key in required)
+            elif raw_enabled is False:
+                # Explicit disable in config.yaml wins over any env flag.
+                configured = False
+            else:
+                # Token-free platform (no required env vars): its setup signal is being
+                # switched on — either enabled: true in config.yaml, or the <ID>_ENABLED
+                # flag that setup wizards write to the profile's .env (#141854).
+                configured = raw_enabled is True or _env_flag_on(env_on_disk.get(f"{platform_id.upper()}_ENABLED"))
             enabled = False if raw_enabled is False else bool(raw_enabled) or configured
             home_channel = hc if isinstance(hc, dict) else None
         except Exception:
-            enabled, home_channel = False, None
+            enabled, configured, home_channel = False, False, None
         return enabled, configured, home_channel
     try:
         from gateway.config import Platform, load_gateway_config
