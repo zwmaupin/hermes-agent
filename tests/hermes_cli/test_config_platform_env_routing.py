@@ -108,3 +108,72 @@ def test_env_writer_denylist_guards_upper_snake_names_and_unknown_names_get_a_no
     cfg.set_config_value("SOME_PLUGIN_ONLY_KNOB", "xyz")
     assert "SOME_PLUGIN_ONLY_KNOB=xyz" in (tmp_path / ".env").read_text(encoding="utf-8")
     assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test/model"}}
+
+
+def test_set_and_unset_drop_case_variant_yaml_alias_of_a_registered_setting(tmp_path, monkeypatch, capsys):
+    """Regression for #142057: a registered environment setting is the SAME setting under any
+    accepted case alias, so ``config set`` migrates and ``config unset`` removes a legacy
+    top-level ``config.yaml`` copy spelled differently. Otherwise ``config unset
+    FEISHU_HOME_CHANNEL`` leaves ``feishu_home_channel`` behind and reading it under the old
+    spelling returns the pre-unset value."""
+    from hermes_cli import config as cfg
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(tmp_path / "managed"))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  default: test-model\nfeishu_home_channel: oc_old\n", encoding="utf-8")
+
+    cfg.set_config_value("FEISHU_HOME_CHANNEL", "oc_new")
+    capsys.readouterr()
+    # The lowercase copy converged on set: .env is now the only copy.
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test-model"}}
+    assert (tmp_path / ".env").read_text(encoding="utf-8") == "FEISHU_HOME_CHANNEL=oc_new\n"
+    cfg.get_config_value("feishu_home_channel")
+    out = capsys.readouterr()
+    assert out.out.strip() == "oc_new"
+    assert "stale" not in out.err
+
+    cfg.unset_config_value("FEISHU_HOME_CHANNEL")
+    capsys.readouterr()
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test-model"}}
+    with pytest.raises(SystemExit):
+        cfg.get_config_value("feishu_home_channel")
+    assert "not set" in capsys.readouterr().err
+
+
+def test_mixed_case_yaml_alias_is_dropped_too(tmp_path, monkeypatch, capsys):
+    """The alias match is by upper-cased name, so ``Feishu_Home_Channel`` is the same setting."""
+    from hermes_cli import config as cfg
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(tmp_path / "managed"))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  default: test-model\nFeishu_Home_Channel: oc_old\n", encoding="utf-8")
+
+    cfg.unset_config_value("FEISHU_HOME_CHANNEL")
+    capsys.readouterr()
+
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {"model": {"default": "test-model"}}
+    with pytest.raises(SystemExit):
+        cfg.get_config_value("Feishu_Home_Channel")
+    assert "not set" in capsys.readouterr().err
+
+
+def test_unregistered_name_keeps_its_case_sensitive_yaml_key(tmp_path, monkeypatch):
+    """Control for #142057: a name Hermes never registered has no aliases, so unsetting the
+    UPPER_SNAKE spelling must NOT delete an unrelated lowercase YAML key."""
+    from hermes_cli import config as cfg
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(tmp_path / "managed"))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "model:\n  default: test-model\nmy_custom_flag: keepme\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit):
+        cfg.unset_config_value("MY_CUSTOM_FLAG")  # MY_CUSTOM_FLAG is not my_custom_flag
+
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8")) == {
+        "model": {"default": "test-model"}, "my_custom_flag": "keepme"}

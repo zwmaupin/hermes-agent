@@ -42,13 +42,24 @@ def is_env_setting_key(key: str) -> bool:
 
 
 def _drop_config_yaml_copies(key: str) -> bool:
-    """Remove same-named top-level ``config.yaml`` copies (as typed and upper-cased) so the ``.env``
-    value is the only one the gateway bridge and CLI readers can disagree about."""
+    """Remove same-named top-level ``config.yaml`` copies so the ``.env`` value is the only one the
+    gateway bridge and CLI readers can disagree about.
+
+    A registered environment setting is the SAME setting under any accepted case alias
+    (``config get/set/unset`` all take ``feishu_home_channel`` for ``FEISHU_HOME_CHANNEL``), so a
+    legacy copy spelled differently is removed with it. Without this, ``config unset
+    FEISHU_HOME_CHANNEL`` leaves the lowercase copy behind and reading it under the old spelling
+    returns the pre-unset value (#142057). An unregistered name has no aliases, so it keeps the
+    case-sensitive spelling: a lowercase ``my_flag`` is an ordinary YAML key, not a copy of
+    ``MY_FLAG``."""
     from hermes_cli.config import _write_user_config, get_config_path, require_readable_config_before_write
 
     config_path = get_config_path()
     user_config = require_readable_config_before_write(config_path)
-    stale = [name for name in {key, key.upper()} if name in user_config]
+    if is_registered_env_name(key.upper()):
+        stale = [name for name in user_config if name.upper() == key.upper()]
+    else:
+        stale = [name for name in {key, key.upper()} if name in user_config]
     for name in stale:
         del user_config[name]
     if stale:
