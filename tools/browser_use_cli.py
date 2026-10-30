@@ -396,6 +396,30 @@ def _resolve_local_cdp(env: dict, task_id: Optional[str], session_name: str = ""
     return err
 
 
+def _cdp_override_active() -> bool:
+    """A SHARED-browser CDP override (`browser.cdp_url` / ``/browser connect``) is configured — the
+    same source ``_resolve_backend_cdp`` keys ``BU_CDP_*`` off. Purely read-only: ``get_cdp_override_raw``
+    reports only a configured raw override, never probing a live browser."""
+    from tools.browser_session_cdp import get_cdp_override_raw
+    return bool(_quiet(get_cdp_override_raw, ""))
+
+
+def _task_session_name(task_id: str) -> str:
+    """``task-<task_id>`` with every character outside the _SESSION_RE grammar folded to '-',
+    capped so the derived name stays inside it (<=64 chars, leading char alnum via the prefix)."""
+    return "task-" + re.sub(r"[^A-Za-z0-9_-]", "-", task_id)[:59]
+
+
+def _derive_shared_cdp_session(session: str, task_id: Optional[str]) -> str:
+    """The session name an UNNAMED browser_exec with a task_id drives on a SHARED browser (CDP
+    override): ``task-<task_id>`` (see #141692 and ``_task_session_name``), so the call keys its
+    own harness daemon instead of every chat sharing daemon identity's literal ``default``.
+    Named sessions and CLI one-shots (no task_id) are returned unchanged."""
+    if not session and task_id and _cdp_override_active():
+        return _task_session_name(task_id)
+    return session
+
+
 def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = "",
                          force_local_sidecar: bool = False) -> Optional[str]:
     """Point the harness at the configured backend's CDP endpoint; error string on failure.
@@ -784,6 +808,12 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     verdict = _code_url_verdict(code)
     if verdict.blocked:
         return tool_error(verdict.blocked)
+    # An unnamed call keys daemon_identity's literal "default" — on a SHARED browser (CDP override)
+    # two concurrent chats would each drive that one daemon's tab and clobber each other (#141692).
+    # Derive a per-chat session name from it, then fall through the normal validation,
+    # BU_NAME, and own-tab preamble paths below. CLI one-shots (no task_id) keep the shared
+    # default, and named sessions are never rewritten (see _derive_shared_cdp_session).
+    session = _derive_shared_cdp_session(session, task_id)
     # One endpoint per call: any private URL sends the whole call to the local sidecar. A call with no URL
     # literal stays on the route the previous call took.
     route_key = _backend_cache_key(task_id, session)

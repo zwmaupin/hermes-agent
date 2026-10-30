@@ -73,6 +73,13 @@ def _fake_cli(tmp_path, body):
     script = tmp_path / "browser-use"
     script.write_text("#!/bin/sh\n" + body, encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    if os.name == "nt":
+        # Windows cannot exec a shebang script as an image (WinError 193), and
+        # the CLI is launched with shell=False: hand _find_cli a thin .cmd that
+        # runs the same POSIX body under git-bash, stdin passed through.
+        shim = tmp_path / "browser-use.cmd"
+        shim.write_text("@bash %~dp0browser-use\n")
+        return str(shim)
     return str(script)
 
 
@@ -576,6 +583,78 @@ class TestOwnTabPreamble:
         ast.parse(bu_cli._OWN_TAB_PREAMBLE)
         # and composes with model code
         ast.parse(bu_cli._OWN_TAB_PREAMBLE + "print('x')")
+
+
+class TestUnnamedCdpTaskSessions:
+    """An UNNAMED browser_exec carrying a task_id on a SHARED browser (a /browser connect CDP
+    override) names its session ``task-<task_id>`` — the task id is already the per-chat
+    workspace/route key, so it is stable within a chat and distinct between them — instead of
+    letting every chat share daemon identity's literal ``default`` (#141692). CLI one-shots
+    (no task_id) keep the shared default, and named sessions are untouched."""
+
+    def _run(self, tmp_path, monkeypatch, *, session="", task_id=None, shared_cdp=""):
+        monkeypatch.setattr("tools.browser_session_cdp.get_cdp_override_raw", lambda: shared_cdp)
+        monkeypatch.setattr(bs_cloud, "get_cloud_provider", lambda: None)
+        cli = _fake_cli(tmp_path, 'cat\necho "bu_name:${BU_NAME:-default}"\n')
+        monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
+        return json.loads(
+            bu_cli.browser_exec("print('payload')", session=session, task_id=task_id))
+
+    def test_unnamed_with_task_id_on_shared_cdp_gets_task_session_and_preamble(self,
+                                                                               tmp_path,
+                                                                               monkeypatch):
+        result = self._run(tmp_path, monkeypatch, task_id="t1",
+                           shared_cdp="http://127.0.0.1:9222")
+        assert result["success"] is True
+        assert "bu_name:task-t1" in result["output"]
+        # the own-tab preamble now applies to the derived session too, before the model code
+        assert "_hermes_ensure_own_tab" in result["output"]
+        assert result["output"].index("_hermes_ensure_own_tab") \
+            < result["output"].index("print('payload')")
+
+    def test_unnamed_without_task_id_on_shared_cdp_keeps_default(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, shared_cdp="http://127.0.0.1:9222")
+        assert result["success"] is True
+        assert "bu_name:default" in result["output"]
+        assert "_hermes_ensure_own_tab" not in result["output"]
+
+    def test_named_session_with_task_id_still_uses_given_name(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, session="r7k2", task_id="t1",
+                           shared_cdp="http://127.0.0.1:9222")
+        assert result["success"] is True
+        assert "bu_name:r7k2" in result["output"]
+
+    def test_distinct_task_ids_get_distinct_session_names(self, tmp_path, monkeypatch):
+        one = self._run(tmp_path, monkeypatch, task_id="t1",
+                        shared_cdp="http://127.0.0.1:9222")
+        two = self._run(tmp_path, monkeypatch, task_id="t2",
+                        shared_cdp="http://127.0.0.1:9222")
+        assert "bu_name:task-t1" in one["output"]
+        assert "bu_name:task-t2" in two["output"]
+
+    def test_repeated_task_id_gets_the_same_session_name(self, tmp_path, monkeypatch):
+        one = self._run(tmp_path, monkeypatch, task_id="t1",
+                        shared_cdp="http://127.0.0.1:9222")
+        two = self._run(tmp_path, monkeypatch, task_id="t1",
+                        shared_cdp="http://127.0.0.1:9222")
+        assert one["output"] == two["output"]
+
+    def test_task_id_weird_characters_are_sanitized_to_session_grammar(self, tmp_path,
+                                                                       monkeypatch):
+        result = self._run(tmp_path, monkeypatch, task_id="t 1/2·3!",
+                           shared_cdp="http://127.0.0.1:9222")
+        assert result["success"] is True
+        assert "bu_name:task-t-1-2-3-" in result["output"]
+        assert bu_cli._SESSION_RE.match("task-t-1-2-3-")
+
+    def test_long_task_id_is_capped_at_64_characters(self, tmp_path, monkeypatch):
+        result = self._run(tmp_path, monkeypatch, task_id="t" * 100,
+                           shared_cdp="http://127.0.0.1:9222")
+        assert result["success"] is True
+        assert "bu_name:task-" in result["output"]
+        derived = result["output"].split("bu_name:")[1].split("\n")[0]
+        assert len(derived) <= 64
+        assert bu_cli._SESSION_RE.match(derived)
 
 
 class TestProviderPickerIntegration:
