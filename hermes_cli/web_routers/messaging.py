@@ -160,6 +160,11 @@ def _require_platform(platform_id: str) -> dict[str, Any]:
     return entry
 
 
+def _env_flag_on(value: Any) -> bool:
+    """True when an ``<ID>_ENABLED``-style .env value switches a platform on (1/true/yes/on)."""
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _platform_enablement(
     platform_id: str, entry: dict[str, Any], env_on_disk: dict[str, str], scoped: bool,
     source_keys: Collection[str] = (),
@@ -181,6 +186,14 @@ def _platform_enablement(
             else:
                 # Setup writes credentials without a platforms entry; explicit disable wins.
                 raw_enabled = plat_cfg.get("enabled")
+                if not required and raw_enabled is not False:
+                    # Token-free plugin platform (a2a, …): ``builtin_platform_status`` has no verdict
+                    # for it, and there is no credential to judge, so the switch itself is the setup
+                    # signal — the same rule its built-in peers get from the connected checkers
+                    # (``Platform.WEBHOOK: lambda cfg: True``), and the ``<ID>_ENABLED`` flag setup
+                    # wizards write to the profile's .env (#141854).
+                    configured = raw_enabled is True or _env_flag_on(
+                        env_on_disk.get(f"{platform_id.upper()}_ENABLED"))
                 enabled = False if raw_enabled is False else bool(raw_enabled) or configured
             home_channel = hc if isinstance(hc, dict) else None
         except Exception:  # health: allow BLE001 -- one platform's bad config must not blank the page
