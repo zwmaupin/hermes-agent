@@ -266,7 +266,8 @@ export function useModelControls({
       const touchesPrimary = !liveSessionId || liveSessionId === primaryRuntimeId
 
       const readSnapshot = (): ModelPickSnapshot => {
-        const tileState = touchesPrimary ? undefined : $sessionStates.get()[liveSessionId!]
+        const runtimeState = liveSessionId ? $sessionStates.get()[liveSessionId] : undefined
+        const tileState = touchesPrimary ? undefined : runtimeState
 
         return {
           composerSelection: getComposerModelSelection(),
@@ -274,7 +275,18 @@ export function useModelControls({
           provider: touchesPrimary ? $currentProvider.get() : (tileState?.provider ?? ''),
           reasoningEffortWire: touchesPrimary
             ? $currentReasoningEffortWire.get()
-            : (tileState?.reasoningEffortWire ?? '')
+            : (tileState?.reasoningEffortWire ?? ''),
+          // The live session's own paint, which the pill reads for a primary chat and which the
+          // sticky draft is free to differ from: a rejected switch must restore both.
+          ...(touchesPrimary && runtimeState
+            ? {
+                runtimeSelection: {
+                  model: runtimeState.model,
+                  provider: runtimeState.provider,
+                  reasoningEffortWire: runtimeState.reasoningEffortWire ?? ''
+                }
+              }
+            : {})
         }
       }
 
@@ -335,11 +347,16 @@ export function useModelControls({
           }))
         }
 
-        // Roll the optimistic session-state paint back with the draft, or a failed pick leaves
-        // the pill on a model the gateway rejected.
-        paintSessionState(snapshot.model, snapshot.provider, snapshot.reasoningEffortWire)
+        // The sticky draft and the active session can have different models: the block above
+        // restores the draft, this one restores the runtime paint and the cache it feeds.
+        const runtime = touchesPrimary ? snapshot.runtimeSelection : undefined
+        paintSessionState(
+          runtime?.model ?? snapshot.model,
+          runtime?.provider ?? snapshot.provider,
+          runtime?.reasoningEffortWire ?? snapshot.reasoningEffortWire
+        )
 
-        cacheSelection(snapshot.provider, snapshot.model)
+        cacheSelection(runtime?.provider ?? snapshot.provider, runtime?.model ?? snapshot.model)
       }
 
       paintSelection()

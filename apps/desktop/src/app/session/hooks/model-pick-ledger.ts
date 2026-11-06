@@ -11,6 +11,13 @@ export interface ModelPickSnapshot {
   model: string
   provider: string
   reasoningEffortWire: string
+  // A primary chat's live session may differ from the sticky draft. Keep both
+  // when an optimistic picker change needs to be rolled back.
+  runtimeSelection?: {
+    model: string
+    provider: string
+    reasoningEffortWire: string
+  }
 }
 
 interface PendingPick {
