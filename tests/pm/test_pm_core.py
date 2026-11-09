@@ -492,6 +492,80 @@ def test_gc_keeps_used_removes_orphans(pm_env):
     assert any(p.name.startswith("faketool-1.0") for p in runtime.iterdir())
 
 
+def _mint_bin_launcher(hermes_home: Path, interpreter: Path, name: str = "hermes.cmd") -> Path:
+    """The launcher body ``mint_launcher`` writes when distlib is unavailable.
+
+    First line is ``@echo off``; the second is the embedded absolute
+    interpreter, exactly as the published ``<HERMES_HOME>\\bin`` launchers carry
+    it. Written here rather than minted so the test never calls ``expose_cli``
+    (whose default root is the checkout under test).
+    """
+    bin_dir = hermes_home / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    target = bin_dir / name
+    target.write_text(f'@echo off\r\n"{interpreter}" -I -c "pass" %*\r\n', encoding="utf-8")
+    return target
+
+
+def _store_python_entry(runtime: Path, name: str) -> Path:
+    """A store entry shaped like a real store Python (``+`` and digits in the name)."""
+    entry = runtime / name
+    (entry / "bin").mkdir(parents=True)
+    (entry / "bin" / "python.exe").write_bytes(b"fake interpreter")
+    return entry
+
+
+def test_gc_keeps_a_store_python_only_a_bin_launcher_runs(pm_env, capsys):
+    """#146823: ``bin\\hermes.cmd`` embeds an absolute store interpreter that no
+    pm fact records. Reclaiming it kills every launcher: the next
+    ``hermes.cmd --version`` prints "The system cannot find the path specified."."""
+    from hermes_cli._launchers import _launcher_python
+    from pm.cli import cmd_gc
+
+    _, runtime, *_ = pm_env
+    entry = _store_python_entry(runtime, "python-3.14.9+20260224-win32-x64")
+    launcher = _mint_bin_launcher(Path(os.environ["HERMES_HOME"]), entry / "bin" / "python.exe")
+    # The sweep reads the real launcher shape, not a fixture stand-in.
+    assert _launcher_python(launcher) == entry / "bin" / "python.exe"
+
+    cmd_gc(None)
+
+    assert (entry / "bin" / "python.exe").is_file(), "gc deleted the interpreter hermes.cmd runs"
+    assert f"keeping {entry.name}: {launcher} runs its interpreter" in capsys.readouterr().out
+
+
+def test_gc_still_reclaims_a_store_entry_no_launcher_runs(pm_env):
+    """The launcher check is a keep predicate, not a gc off switch."""
+    from pm.cli import cmd_gc
+
+    _, runtime, *_ = pm_env
+    live = _store_python_entry(runtime, "python-3.14.9+20260224-win32-x64")
+    stale = _store_python_entry(runtime, "python-3.13.7+20251201-win32-x64")
+    _mint_bin_launcher(Path(os.environ["HERMES_HOME"]), live / "bin" / "python.exe")
+
+    cmd_gc(None)
+
+    assert live.is_dir()
+    assert not stale.exists(), "an entry no fact and no launcher names must still be reclaimed"
+
+
+def test_gc_launcher_pointing_elsewhere_does_not_protect_a_store_entry(pm_env, tmp_path):
+    """The launcher's interpreter PATH decides, not the entry name it shares."""
+    from pm.cli import cmd_gc
+
+    _, runtime, *_ = pm_env
+    name = "python-3.14.9+20260224-win32-x64"
+    unused = _store_python_entry(runtime, name)
+    elsewhere = tmp_path / "other-store" / name / "bin" / "python.exe"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_bytes(b"other store's interpreter")
+    _mint_bin_launcher(Path(os.environ["HERMES_HOME"]), elsewhere)
+
+    cmd_gc(None)
+
+    assert not unused.exists(), "a launcher for another store must not protect this one's entry"
+
+
 def _hold(monkeypatch, *prefixes):
     """Model a Windows hold (a running process mapping the old interpreter's
     DLLs): removal under these names fails past every retry; rename still works."""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -532,6 +533,89 @@ def _doctor_uv_cache(*, repair: bool) -> int:
     return 0
 
 
+def _inside(path: Path, parent: Path) -> bool:
+    """Lexical containment for a store path.
+
+    Store entry names are opaque: a ``*``, ``+`` or ``[...]`` in one is a
+    literal character, never a glob. Compare the strings, never glob and never
+    ``exists()`` — a launcher may point into an entry that is already
+    half-deleted, and only what it recorded decides.
+    """
+    inner = _lexical_path(path)
+    outer = _lexical_path(parent)
+    return inner == outer or inner.startswith(outer + os.sep)
+
+
+def _lexical_path(path: Path) -> str:
+    r"""One spelling for a path the store and a launcher each write differently.
+
+    ``store.root`` reaches the sweep through ``Path.resolve()``, which on
+    Windows hands back the extended-length ``\\?\C:\...`` form, while a launcher
+    records the plain ``C:\...`` the installer passed it. Strip that prefix
+    (``\\?\UNC\`` back to a plain share path, as profiles.py does) before
+    comparing, or every launcher reads as pointing outside the store.
+    """
+    text = os.path.normcase(os.path.abspath(str(path)))
+    unc = "\\\\?\\unc\\"
+    if text.startswith(unc):
+        return "\\\\" + text[len(unc):]
+    return text.removeprefix("\\\\?\\")
+
+
+def _launcher_bin_dirs() -> tuple[Path, ...]:
+    """The directories Hermes mints launchers into.
+
+    ``$HERMES_HOME/bin`` is the installer/update pair the user's PATH runs;
+    ``<checkout>/.hermes/bin`` is the checkout-local pair, and ``<checkout>/bin``
+    is the legacy location an older installer staged and deliberately left
+    behind for editors.
+    """
+    from hermes_constants import get_default_hermes_root
+
+    checkout = repo_root()
+    return (get_default_hermes_root() / "bin", checkout / ".hermes" / "bin", checkout / "bin")
+
+
+def _launcher_held_entries(store_root: Path) -> dict[str, Path]:
+    """Store entries a minted launcher still execs, mapped to that launcher.
+
+    A launcher embeds the ABSOLUTE store interpreter it runs
+    (``"<store>\\python-3.14.9+2026...\\python.exe" -I -c ...``) and records it
+    in no pm fact, so a facts-only sweep reclaimed the interpreter out from
+    under ``<HERMES_HOME>\\bin\\hermes.cmd`` (#146823) and the launcher then died
+    with "The system cannot find the path specified."
+
+    The check lives on the READ side on purpose: recording a launcher's target
+    when minting it protects only launchers written after that change, while
+    the launchers already on disk — the broken ones — stay invisible. Parsing
+    ``bin/`` on every sweep covers both generations, and it uses the launcher
+    module's own parser (``_launcher_python``), so the distlib ``.exe`` shebang
+    and the ``.cmd`` first line read exactly as they were written.
+    """
+    try:
+        from hermes_cli._launchers import _launcher_python
+    except ImportError:  # sealed stages (`pm bundle`) run without hermes_cli
+        return {}
+    try:
+        entries = [item for item in store_root.iterdir() if item.is_dir()]
+    except OSError:
+        return {}
+    held: dict[str, Path] = {}
+    for directory in _launcher_bin_dirs():
+        try:
+            launchers = sorted(directory.iterdir())
+        except OSError:
+            continue
+        for launcher in launchers:
+            interpreter = _launcher_python(launcher)
+            if interpreter is None:
+                continue
+            for entry in entries:
+                if _inside(interpreter, entry):
+                    held.setdefault(entry.name, launcher)
+    return held
+
+
 def _gc_store(store, facts) -> tuple[int, int]:
     """The sweep core shared by `pm gc` and `pm bundle`.
 
@@ -539,8 +623,8 @@ def _gc_store(store, facts) -> tuple[int, int]:
     dirs (the raw archives — needed only at install time, dead weight in a
     staged payload or a CI cache), orphaned package versions from an older
     lock, and expired partials. Keeps live package entries (recorded in
-    facts) and partials an in-flight download still owns. Returns
-    (removed, kept).
+    facts), entries a ``bin`` launcher still runs its interpreter out of, and
+    partials an in-flight download still owns. Returns (removed, kept).
     """
     from pm.download_state import collect_partials
     from pm import paths
@@ -555,6 +639,11 @@ def _gc_store(store, facts) -> tuple[int, int]:
         facts.forget(RETIRED_DEFAULTS)
         facts.reload()
         keep = facts.entries_in_use()
+        # Launchers are an input to the sweep, not a fact: say what they saved.
+        for name, launcher in sorted(_launcher_held_entries(store.root).items()):
+            if name not in keep:
+                keep.add(name)
+                print(f"keeping {name}: {launcher} runs its interpreter")
         collect_partials(partials_dir)
         removed += _reclaim_set_aside(store)
         for item in sorted(store.root.iterdir()):
