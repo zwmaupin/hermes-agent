@@ -46,6 +46,8 @@ _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
 _BOT_DESKTOP_BROWSER_SENTINEL = "_HERMES_BU_BOT_DESKTOP_BROWSER"
 # The note when the consented real profile could not load (the route fell back). Popped before launch.
 _REAL_PROFILE_FALLBACK_SENTINEL = "_HERMES_BU_REAL_PROFILE_FALLBACK"
+# The warning when the served real-profile copy holds cookies it cannot decrypt. Popped before launch.
+_REAL_PROFILE_COOKIE_WARNING_SENTINEL = "_HERMES_BU_REAL_PROFILE_COOKIE_WARNING"
 # local=True whose real profile could not load: run on the local sidecar browser. Popped before launch.
 _LOCAL_FALLBACK_SENTINEL = "_HERMES_BU_LOCAL_FALLBACK"
 # Where new/hidden tabs may be brought to the front: a browser_use_shot.ACTIVATE_* mode. Popped before launch.
@@ -355,10 +357,13 @@ def _sidecar_daemon_name(name: str) -> str:
 def _export_real_profile_note(env: dict, key: str) -> None:
     """The session layer decides real profile vs fresh browser once per key; carry its note (if it fell
     back) so the result reports the browser this call actually drives."""
-    from tools.browser_session import real_profile_note
+    from tools.browser_session import real_profile_cookie_note, real_profile_note
     note = real_profile_note(key)
     if note:
         env.setdefault(_REAL_PROFILE_FALLBACK_SENTINEL, note)
+    warning = real_profile_cookie_note(key)
+    if warning:
+        env.setdefault(_REAL_PROFILE_COOKIE_WARNING_SENTINEL, warning)
 
 
 def _mark_local_browser(env: dict, session: dict, key: str) -> None:
@@ -626,6 +631,9 @@ _exec_route_is_sidecar: dict[str, bool] = {}
 # Route cache key -> the note from its real-profile fallback; that route stays on the fallback browser.
 _real_profile_fallback: dict[str, str] = {}
 _real_profile_note_delivered: set = set()
+# Route cache key -> the app-bound cookie warning for the real-profile copy it drives, delivered once.
+_real_profile_cookie_warning: dict[str, str] = {}
+_real_profile_cookie_note_delivered: set = set()
 
 
 def stop_harness_daemons(home_key: Optional[str] = None) -> None:
@@ -739,6 +747,9 @@ def _route_exec(env: dict, session: str, task_id: Optional[str], local: bool, lo
     note = env.pop(_REAL_PROFILE_FALLBACK_SENTINEL, None)
     if note:
         _real_profile_fallback.setdefault(route_key, note)
+    warning = env.pop(_REAL_PROFILE_COOKIE_WARNING_SENTINEL, None)
+    if warning:
+        _real_profile_cookie_warning.setdefault(route_key, warning)
     return route_err, local_sidecar or bool(env.pop(_LOCAL_FALLBACK_SENTINEL, None))
 
 
@@ -766,11 +777,16 @@ def _reload_if_republished(env: dict, generation: int) -> None:
 
 
 def _take_real_profile_note(route_key: str) -> dict:
-    """The fallback note for the first result this route returns after falling back, then nothing."""
-    if route_key not in _real_profile_fallback or route_key in _real_profile_note_delivered:
-        return {}
-    _real_profile_note_delivered.add(route_key)
-    return {"real_profile_unavailable": _real_profile_fallback[route_key]}
+    """The real-profile notes for the first result this route returns, then nothing: why a fresh
+    browser serves instead, and/or what the served copy will lose on its first load."""
+    out: dict = {}
+    if route_key in _real_profile_fallback and route_key not in _real_profile_note_delivered:
+        _real_profile_note_delivered.add(route_key)
+        out["real_profile_unavailable"] = _real_profile_fallback[route_key]
+    if route_key in _real_profile_cookie_warning and route_key not in _real_profile_cookie_note_delivered:
+        _real_profile_cookie_note_delivered.add(route_key)
+        out["real_profile_cookie_warning"] = _real_profile_cookie_warning[route_key]
+    return out
 
 
 def _no_code_error(code: str) -> Optional[str]:

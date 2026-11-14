@@ -10,6 +10,7 @@ Chromiums on one copy dir); it is terminated at exit or when THAT profile turns 
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -33,6 +34,26 @@ def real_profile_fallback_note(err: str) -> str:
     working (a consented user is never left with no browser), and the model is told it is signed out."""
     return (f"{err} Using a fresh browser without the user's logins for this session instead; "
             "tell the user if the task needs their accounts.")
+
+
+def real_profile_cookie_warning(root: Optional[str] = None) -> Optional[str]:
+    """What the real-profile snapshot on THIS home will silently lose, or None.
+
+    One copy-browser serves every session of a profile home, so any snapshot under the home's
+    ``browser-profile`` that holds app-bound cookie rows describes the browser the agent is about to
+    drive: those rows die on its first load and the session reads signed out (#96993)."""
+    from hermes_cli.browser_connect import app_bound_cookie_warning
+    from hermes_constants import get_hermes_home
+    base = os.path.join(root or str(get_hermes_home()), "browser-profile")
+    try:
+        snapshots = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for name in snapshots:
+        warning = app_bound_cookie_warning(os.path.join(base, name))
+        if warning:
+            return warning
+    return None
 
 
 def _unsupported_reason(browser) -> Optional[str]:

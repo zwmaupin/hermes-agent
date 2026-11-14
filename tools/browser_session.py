@@ -155,6 +155,13 @@ def real_profile_note(cache_key: Optional[str]) -> Optional[str]:
         return (_active_sessions.get(cache_key or "default") or {}).get("real_profile_unavailable")
 
 
+def real_profile_cookie_note(cache_key: Optional[str]) -> Optional[str]:
+    """The app-bound cookie warning on ``cache_key``'s existing session: the copy it drives will lose
+    those rows on first launch and may read signed out (#96993)."""
+    with _cleanup_lock:
+        return (_active_sessions.get(cache_key or "default") or {}).get("real_profile_cookie_warning")
+
+
 def session_for_task(task_id: Optional[str]) -> dict[str, Any]:
     """The active session serving ``task_id`` (its exact key, else one whose owner is that task), or {}."""
     task = task_id or "default"
@@ -235,7 +242,8 @@ def _create_local_session(cache_key: str, allow_real_profile: bool = True) -> di
     reach an arbitrary internal host the model chose."""
     fallback_note = None
     if allow_real_profile:
-        from tools.browser_session_real_profile import real_profile_cdp, real_profile_fallback_note, real_profile_key
+        from tools.browser_session_real_profile import (real_profile_cdp, real_profile_cookie_warning,
+                                                       real_profile_fallback_note, real_profile_key)
         cdp_url, err = real_profile_cdp()
         if err:
             logger.warning("real-profile unavailable for %s, using a fresh browser: %s", cache_key, err)
@@ -243,6 +251,9 @@ def _create_local_session(cache_key: str, allow_real_profile: bool = True) -> di
         elif cdp_url:
             info = _session_record("rp", cdp_url, {"local": True, "real_profile": True})
             info.update(launcher_key=real_profile_key(), shared_profile=True)
+            warning = real_profile_cookie_warning()
+            if warning:  # the copy keeps its rows but cannot decrypt them: say so on the first result
+                info["real_profile_cookie_warning"] = warning
             logger.info("Created real-profile local session %s for %s", info["session_name"], cache_key)
             return info
     from tools.browser_lightpanda import using_lightpanda_engine
