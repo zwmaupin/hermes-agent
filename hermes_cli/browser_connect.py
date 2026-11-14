@@ -516,9 +516,58 @@ def _unavailable_auth_dbs_error(browser: str, failed: dict[str, str]) -> str:
 
 
 _SNAPSHOT_DONE_MARKER = ".hermes-snapshot-complete"
+# Row count of the copy's app-bound (Chromium ``v20``) cookie rows, recorded next to the done
+# marker. Kept out of the marker itself: its content is the source profile name and every reuse
+# path compares against it.
+_SNAPSHOT_APP_BOUND_SIDECAR = ".hermes-snapshot-app-bound-cookies"
+# Chromium's app-bound-encryption prefix on ``encrypted_value`` (hex 763230). Those rows only
+# decrypt inside the browser context that wrote them, so a copied profile loses them.
+_APP_BOUND_PREFIX = b"v20"
 # Prefix stamped on the "profile is locked" error so the calling layer can recognize the
 # needs-the-browser-closed condition and surface the close-with-approval flow.
 _PROFILE_LOCKED_PREFIX = "[profile-locked] "
+
+
+def _cookie_db(profile_dir: str) -> str | None:
+    """The Cookies DB of the copy's ``Default`` profile (modern ``Network/`` location first)."""
+    return _first_present(
+        os.path.join(profile_dir, "Default", rel)
+        for rel in (os.path.join("Network", "Cookies"), "Cookies"))
+
+
+def count_app_bound_cookies(profile_dir: str) -> int:
+    """How many cookie rows in ``profile_dir`` are app-bound encrypted. 0 when there is no cookie
+    DB or it can't be read: this only feeds a warning, never a decision."""
+    db = _cookie_db(profile_dir)
+    if not db:
+        return 0
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True)) as con:
+            return con.execute(
+                "select count(*) from cookies where substr(encrypted_value, 1, 3) = ?",
+                (_APP_BOUND_PREFIX,)).fetchone()[0]
+    except sqlite3.Error as e:
+        logger.debug("real-profile: could not count app-bound cookies in %s: %s", db, e)
+        return 0
+
+
+def app_bound_cookie_warning(profile_dir: str) -> str | None:
+    """What the user needs to know about ``profile_dir``'s snapshot, or None.
+
+    A copied profile keeps ``Local State`` and the cookie DB verbatim, but app-bound rows can only
+    be decrypted by the browser context that wrote them: the copy browser deletes them on its first
+    load, so the session reads signed out while every file was copied correctly (#96993)."""
+    try:
+        with open(os.path.join(profile_dir, _SNAPSHOT_APP_BOUND_SIDECAR), encoding="utf-8-sig") as fh:
+            rows = int(fh.read().strip() or 0)
+    except (OSError, ValueError):
+        return None
+    if rows <= 0:
+        return None
+    return (f"{rows} copied cookie(s) are app-bound encrypted (v20), which a copied profile cannot "
+            f"decrypt: the copy browser deletes them when it first loads, so this session reads "
+            f"signed out even though the profile was copied completely. Sign in again inside the "
+            f"copy browser, or use that browser's own window for sites you are already signed into.")
 
 
 def _profile_is_locked(src: str, source_profile: str) -> bool:
@@ -778,6 +827,18 @@ def snapshot_real_profile(browser: str, src: str | None = None) -> tuple[str | N
         failed_dbs = _mirror_profile_auth(src, dst, source_profile)
         if failed_dbs:  # no session cookies: a "real profile" launch would be signed out
             return None, _unavailable_auth_dbs_error(browser, failed_dbs)
+        # The copy is byte-complete, but app-bound rows won't survive the copy browser's first load:
+        # record how many, so the launch path can say "signed out" instead of implying a session it
+        # cannot deliver (#96993). Detection never fails the snapshot.
+        app_bound_rows = count_app_bound_cookies(dst)
+        with contextlib.suppress(OSError):
+            Path(os.path.join(dst, _SNAPSHOT_APP_BOUND_SIDECAR)).write_text(
+                str(app_bound_rows), encoding="utf-8")
+        if app_bound_rows:
+            logger.warning(
+                "real-profile snapshot: %d app-bound (v20) cookie(s) in the '%s' copy cannot be "
+                "decrypted by the copy browser; they are deleted on its first load and the session "
+                "will read signed out", app_bound_rows, browser)
         _drop_singleton_leftovers(dst)
         # Mark complete only after everything above succeeded.
         try:
