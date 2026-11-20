@@ -163,6 +163,21 @@ class ContextReferenceResult:
     blocked: bool = False
 
 
+# Footers ``preprocess_context_references_async`` appends below the typed text. Consumers
+# that must see only the user's typed words (titles, reactions) strip them with
+# :func:`strip_context_footers`; the pattern lives next to its producer so they cannot drift.
+CONTEXT_FOOTER_RE = re.compile(r"\n+--- (?:Context Warnings|Attached Context) ---\n.*", re.DOTALL)
+
+
+def strip_context_footers(text: str) -> str:
+    """Return *text* without the expansion footers (warnings + attached context).
+
+    Everything from the first ``--- Context Warnings ---`` / ``--- Attached Context ---``
+    header to the end is app-generated content, not words the user typed.
+    """
+    return CONTEXT_FOOTER_RE.sub("", text)
+
+
 UrlFetcher = Callable[[str], str | Awaitable[str]] | None
 Expansion = tuple[str | None, str | None]  # (warning, block) — exactly one side is set
 

@@ -835,13 +835,20 @@ def _emit_reaction(agent: Any, original_user_message: Any, display_kind: Optiona
     if reaction_callback is None or display_kind == "hidden":
         return
     with suppress(Exception):
+        from agent.context_references import strip_context_footers
         from agent.reactions import detect_reaction
         from session_rules.turns import describe_skill_invocation
 
         if describe_skill_invocation(original_user_message) is not None:
             return
 
-        kind = detect_reaction(original_user_message)
+        # The message arrives AFTER @-reference expansion: attached blocks and warnings
+        # are app/page text, not affection the user typed. Non-str (multimodal) content
+        # passes through unchanged — the detector no-ops on it as before.
+        text = original_user_message
+        if isinstance(text, str):
+            text = strip_context_footers(text)
+        kind = detect_reaction(text)
         if kind:
             reaction_callback(kind)
 
